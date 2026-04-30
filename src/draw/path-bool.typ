@@ -204,6 +204,23 @@
 
     let path3d = _wire2d-to-path3d(result.path, z-a)
 
+    // Empty result (e.g. difference of identical shapes): emit no drawables.
+    // Returning an empty `drawable.path(...)` would still be `type: "path"`,
+    // and `process.element` would try to compute bounds via `aabb.aabb([])`,
+    // which panics inside the WASM helper.
+    if path3d.len() == 0 {
+      return (
+        ctx: ctx,
+        name: name,
+        anchors: (anchor) => {
+          if anchor == () { () } else {
+            panic("path-bool: result is empty; no anchor `" + repr(anchor) + "` available")
+          }
+        },
+        drawables: (),
+      )
+    }
+
     let style = styles.resolve(ctx.style, merge: style, root: "path-bool")
 
     let drawables = drawable.path(

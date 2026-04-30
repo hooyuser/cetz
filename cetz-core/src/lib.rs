@@ -118,9 +118,17 @@ struct Bounds {
 fn aabb(init: Option<Bounds>, pts: Vec<Point>) -> Result<Bounds, String> {
     let mut bounds = match init {
         Some(init) => init,
-        None => Bounds {
-            low: pts.first().unwrap().clone().iter().take(3).cloned().collect(),
-            high: pts.first().unwrap().iter().take(3).cloned().collect(),
+        None => match pts.first() {
+            Some(p) => Bounds {
+                low: p.iter().take(3).cloned().collect(),
+                high: p.iter().take(3).cloned().collect(),
+            },
+            // Empty input with no init: return a degenerate zero-volume bbox
+            // at the origin rather than panicking.
+            None => Bounds {
+                low: vec![0.0, 0.0, 0.0],
+                high: vec![0.0, 0.0, 0.0],
+            },
         },
     };
     for pt in pts {
