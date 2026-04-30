@@ -159,3 +159,10 @@ pub fn layout_tree_func(input: &[u8]) -> Result<Vec<u8>, String> {
         Err(e) => Err(e.to_string()),
     }
 }
+
+#[wasm_func]
+pub fn path_bool_func(input: &[u8]) -> Result<Vec<u8>, String> {
+    handle_cbor(input, |args: path_bool::PathBoolArgs| {
+        path_bool::path_bool(args).map_err(|e| e.to_string())
+    })
+}
