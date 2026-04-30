@@ -6,6 +6,7 @@ use wasm_minimal_protocol::*;
 use std::cmp;
 
 mod layout;
+mod path_bool;
 pub use layout::{InputTree, OutputTree};
 initiate_protocol!();
 

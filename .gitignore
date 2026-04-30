@@ -4,3 +4,5 @@ tmp*
 cetz-core/cetz_core.wasm
 **/.rustc_info.json
 
+.history
+
