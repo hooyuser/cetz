@@ -10,3 +10,6 @@ mod wire;
 
 pub use op::path_bool;
 pub use wire::PathBoolArgs;
+
+#[cfg(test)]
+mod tests;
