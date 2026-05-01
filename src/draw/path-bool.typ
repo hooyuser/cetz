@@ -31,8 +31,7 @@
       if ignore-marks { tags.push(drawable.TAG.mark) }
 
       let drawables = drawable.filter-tagged(r.drawables, ..tags)
-      subpaths += drawables.filter(d => d.type == "path")
-        .map(d => d.segments).join()
+      subpaths += drawables.filter(d => d.type == "path").map(d => d.segments).join()
     }
   }
   return (ctx, subpaths)
@@ -60,8 +59,7 @@
 
   let wire-subpaths = ()
   for (origin, closed, segments) in path3d {
-    assert(closed,
-      message: "path-bool: every input subpath must be closed; got an open subpath")
+    assert(closed, message: "path-bool: every input subpath must be closed; got an open subpath")
     check-z(origin)
 
     let wire-segments = segments.map(seg => {
@@ -88,11 +86,7 @@
     ))
   }
 
-  if z-mismatch {
-    // Mismatch is silently projected; surface a panic only in debug builds
-    // by guarding behind a flag would be ideal, but Typst has no such flag.
-    // Per design decision, project and continue.
-  }
+  assert.eq(z-mismatch, false, message: "path-bool: all input vertices must lie in a single z-plane.")
 
   return ((subpaths: wire-subpaths), z0)
 }
@@ -125,8 +119,8 @@
 
 /// Performs a boolean operation on the paths produced by two CeTZ bodies.
 /// The supported operations are `"union"`, `"intersection"`, `"difference"`,
-/// and `"xor"`. The geometry engine is the MIT-licensed `linesweeper` Rust
-/// crate, called through CeTZ's WASM module.
+/// and `"xor"`. The geometry engine is the `linesweeper` Rust crate,
+/// called through CeTZ's WASM module.
 ///
 /// ```example
 /// path-bool(
@@ -173,79 +167,89 @@
   )
   let style = style.named()
 
-  assert(op in ("union", "intersection", "difference", "xor"),
-    message: "path-bool: invalid op " + repr(op))
-  assert(fill-rule in ("non-zero", "even-odd"),
-    message: "path-bool: invalid fill-rule " + repr(fill-rule))
+  assert(
+    op in ("union", "intersection", "difference", "xor"),
+    message: "path-bool: invalid op "
+      + repr(op)
+      + ". Expected one of: \"union\", \"intersection\", \"difference\", \"xor\"",
+  )
 
-  return (ctx => {
-    let ctx = ctx
-    let (ctx, a-path3d) = _collect-path3d(
-      ctx, a,
-      ignore-marks: ignore-marks,
-      ignore-hidden: ignore-hidden,
-    )
-    let (ctx, b-path3d) = _collect-path3d(
-      ctx, b,
-      ignore-marks: ignore-marks,
-      ignore-hidden: ignore-hidden,
-    )
+  assert(
+    fill-rule in ("non-zero", "even-odd"),
+    message: "path-bool: invalid fill-rule " + repr(fill-rule) + ". Expected one of: \"non-zero\", \"even-odd\"",
+  )
 
-    let (a-wire, z-a) = _path3d-to-wire2d(a-path3d)
-    let (b-wire, _z-b) = _path3d-to-wire2d(b-path3d)
+  return (
+    ctx => {
+      let (_, a-path3d) = _collect-path3d(
+        ctx,
+        a,
+        ignore-marks: ignore-marks,
+        ignore-hidden: ignore-hidden,
+      )
+      let (_, b-path3d) = _collect-path3d(
+        ctx,
+        b,
+        ignore-marks: ignore-marks,
+        ignore-hidden: ignore-hidden,
+      )
 
-    let result = call_wasm(cetz-core.path_bool_func, (
-      a: a-wire,
-      b: b-wire,
-      op: op,
-      fill_rule: fill-rule,
-      eps: if eps == auto { none } else { eps },
-    ))
+      let (a-wire, az) = _path3d-to-wire2d(a-path3d)
+      let (b-wire, bz) = _path3d-to-wire2d(b-path3d)
 
-    let path3d = _wire2d-to-path3d(result.path, z-a)
+      assert(
+        calc.abs(az - bz) < 1e-6,
+        message: "path-bool: input paths must lie in the same z-plane; got z=" + repr(az) + " and z=" + repr(bz),
+      )
 
-    // Empty result (e.g. difference of identical shapes): emit no drawables.
-    // Returning an empty `drawable.path(...)` would still be `type: "path"`,
-    // and `process.element` would try to compute bounds via `aabb.aabb([])`,
-    // which panics inside the WASM helper.
-    if path3d.len() == 0 {
+      let result = call_wasm(cetz-core.path_bool_func, (
+        a: a-wire,
+        b: b-wire,
+        op: op,
+        fill_rule: fill-rule,
+        eps: if eps == auto { none } else { eps },
+      ))
+
+      let path3d = _wire2d-to-path3d(result.path, az)
+
+      // Empty result (e.g. difference of identical shapes): emit no drawables.
+      if path3d.len() == 0 {
+        return (
+          ctx: ctx,
+          name: name,
+          anchors: anchor => {
+            if anchor == () { () } else {
+              panic("path-bool: result is empty; no anchor `" + repr(anchor) + "` available")
+            }
+          },
+          drawables: (),
+        )
+      }
+
+      let style = styles.resolve(ctx.style, merge: style, root: "path-bool")
+
+      let drawables = drawable.path(
+        fill: style.fill,
+        fill-rule: fill-rule,
+        stroke: style.stroke,
+        path3d,
+      )
+
+      let (_, anchors) = anchor_.setup(
+        auto,
+        (),
+        name: name,
+        transform: none,
+        path-anchors: true,
+        path: drawables,
+      )
+
       return (
         ctx: ctx,
         name: name,
-        anchors: (anchor) => {
-          if anchor == () { () } else {
-            panic("path-bool: result is empty; no anchor `" + repr(anchor) + "` available")
-          }
-        },
-        drawables: (),
+        anchors: anchors,
+        drawables: drawables,
       )
-    }
-
-    let style = styles.resolve(ctx.style, merge: style, root: "path-bool")
-
-    let drawables = drawable.path(
-      fill: style.fill,
-      fill-rule: fill-rule,
-      stroke: style.stroke,
-      path3d,
-    )
-
-    let (transform, anchors) = anchor_.setup(
-      auto,
-      (),
-      name: name,
-      transform: none,
-      path-anchors: true,
-      path: drawables,
-    )
-
-    drawables = drawable.apply-transform(transform, drawables)
-
-    return (
-      ctx: ctx,
-      name: name,
-      anchors: anchors,
-      drawables: drawables,
-    )
-  },)
+    },
+  )
 }

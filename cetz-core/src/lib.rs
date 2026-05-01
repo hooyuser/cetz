@@ -123,12 +123,9 @@ fn aabb(init: Option<Bounds>, pts: Vec<Point>) -> Result<Bounds, String> {
                 low: p.iter().take(3).cloned().collect(),
                 high: p.iter().take(3).cloned().collect(),
             },
-            // Empty input with no init: return a degenerate zero-volume bbox
-            // at the origin rather than panicking.
-            None => Bounds {
-                low: vec![0.0, 0.0, 0.0],
-                high: vec![0.0, 0.0, 0.0],
-            },
+            None => {
+                return Err("Cannot compute AABB: Point list is empty and no initial bounds were provided.".to_string());
+            }
         },
     };
     for pt in pts {
