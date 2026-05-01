@@ -2,7 +2,6 @@ use ciborium::de::from_reader;
 use ciborium::ser::into_writer;
 use serde::Deserialize;
 use serde::Serialize;
-use std::cmp;
 use wasm_minimal_protocol::*;
 
 mod layout;
@@ -67,7 +66,7 @@ fn cubic_extrema(s: Point, e: Point, c1: Point, c2: Point) -> Result<Vec<Point>,
     for dim in 0..dims {
         let ts = dim_extrema(s[dim], e[dim], c1[dim], c2[dim]);
         for t in ts {
-            if t >= 0.0 && t <= 1.0 {
+            if (0.0..=1.0).contains(&t) {
                 let pt = cubic_point(&s, &e, &c1, &c2, t);
                 pts.push(pt);
             }
@@ -131,12 +130,12 @@ fn aabb(init: Option<Bounds>, pts: Vec<Point>) -> Result<Bounds, String> {
         }
     };
     for pt in pts {
-        for dim in 0..cmp::min(3, pt.len()) {
-            if pt[dim] < bounds.low[dim] {
-                bounds.low[dim] = pt[dim];
+        for (dim, &val) in pt.iter().take(3).enumerate() {
+            if val < bounds.low[dim] {
+                bounds.low[dim] = val;
             }
-            if bounds.high[dim] < pt[dim] {
-                bounds.high[dim] = pt[dim];
+            if bounds.high[dim] < val {
+                bounds.high[dim] = val;
             }
         }
     }

@@ -40,9 +40,9 @@ pub fn bez_to_wire(path: &BezPath) -> Result<WirePath, PathBoolErr> {
     let mut current: Option<WireSubpath> = None;
     let mut current_pt: Option<Point> = None;
 
-    fn last_subpath_mut<'a>(
-        current: &'a mut Option<WireSubpath>,
-    ) -> Result<&'a mut WireSubpath, PathBoolErr> {
+    fn last_subpath_mut(
+        current: &mut Option<WireSubpath>,
+    ) -> Result<&mut WireSubpath, PathBoolErr> {
         current.as_mut().ok_or(PathBoolErr::MalformedPath)
     }
 
