@@ -1,14 +1,3 @@
-//! Top-level `path_bool` entry point: parse args, build a linesweeper
-//! topology, classify each region with per-operand fill rules, and convert
-//! the result back to the wire format.
-//!
-//! linesweeper exposes `binary_op` / `binary_op_with_eps`, but those accept
-//! only a single global `FillRule`. We need each operand to have its own
-//! fill rule, so we drive the lower-level `topology::Topology` API directly:
-//! `Topology::from_paths_binary` already separates winding numbers per shape
-//! (`BinaryWindingNumber { shape_a, shape_b }`), and `Topology::contours`
-//! takes a closure that classifies each region — exactly the seam we need.
-
 use std::panic::AssertUnwindSafe;
 
 use kurbo::{BezPath, Shape};
@@ -16,39 +5,39 @@ use linesweeper::topology::{BinaryWindingNumber, Topology};
 use linesweeper::{BinaryOp, FillRule};
 
 use crate::path_bool::convert::{bez_to_wire, wire_to_bez};
-use crate::path_bool::error::BoolError;
+use crate::path_bool::error::PathBoolErr;
 use crate::path_bool::wire::{PathBoolArgs, PathBoolOutput, WirePath};
 
-fn parse_op(op: &str) -> Result<BinaryOp, BoolError> {
+fn parse_op(op: &str) -> Result<BinaryOp, PathBoolErr> {
     match op {
         "union" => Ok(BinaryOp::Union),
         "intersection" => Ok(BinaryOp::Intersection),
         "difference" => Ok(BinaryOp::Difference),
         "xor" => Ok(BinaryOp::Xor),
-        _ => Err(BoolError::InvalidOp(op.to_string())),
+        _ => Err(PathBoolErr::InvalidOp(op.to_string())),
     }
 }
 
-fn parse_fill_rule(rule: &str) -> Result<FillRule, BoolError> {
+fn parse_fill_rule(rule: &str) -> Result<FillRule, PathBoolErr> {
     match rule {
         "non-zero" => Ok(FillRule::NonZero),
         "even-odd" => Ok(FillRule::EvenOdd),
-        _ => Err(BoolError::InvalidFillRule(rule.to_string())),
+        _ => Err(PathBoolErr::InvalidFillRule(rule.to_string())),
     }
 }
 
-/// Mirror of the auto-eps formula used inside `linesweeper::binary_op`. We
-/// replicate it here because we call the lower-level topology API directly
-/// and `binary_op`'s wrapper isn't on our path.
-fn auto_eps(a: &BezPath, b: &BezPath) -> Result<f64, BoolError> {
+/// Replicates the eps formula from `linesweeper::binary_op`.
+fn auto_eps(a: &BezPath, b: &BezPath) -> Result<f64, PathBoolErr> {
     let bbox = a.bounding_box().union(b.bounding_box());
     let min = bbox.min_x().min(bbox.min_y());
     let max = bbox.max_x().max(bbox.max_y());
     if min.is_nan() || max.is_nan() {
-        return Err(BoolError::LinesweeperFailed("NaN coordinate in input".into()));
+        return Err(PathBoolErr::LinesweeperFailed(
+            "NaN coordinate in input".into(),
+        ));
     }
     if min.is_infinite() || max.is_infinite() {
-        return Err(BoolError::LinesweeperFailed(
+        return Err(PathBoolErr::LinesweeperFailed(
             "infinite coordinate in input".into(),
         ));
     }
@@ -65,7 +54,7 @@ fn winding_inside(winding: i32, fill_rule: FillRule) -> bool {
     }
 }
 
-pub fn path_bool(args: PathBoolArgs) -> Result<PathBoolOutput, BoolError> {
+pub fn path_bool(args: PathBoolArgs) -> Result<PathBoolOutput, PathBoolErr> {
     let op = parse_op(&args.op)?;
     let fill_rule_a = parse_fill_rule(&args.fill_rule_a)?;
     let fill_rule_b = parse_fill_rule(&args.fill_rule_b)?;
@@ -78,11 +67,11 @@ pub fn path_bool(args: PathBoolArgs) -> Result<PathBoolOutput, BoolError> {
     };
 
     // catch_unwind so a panic inside linesweeper turns into a recoverable
-    // error rather than aborting the WASM module. linesweeper's
-    // `NonClosedPath` lives in a private module, so we stringify it inside
-    // the closure to keep our error type nameable here.
+    // error rather than aborting the WASM module.
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let top = Topology::from_paths_binary(&a, &b, eps).map_err(|e| e.to_string())?;
+        // We drive `Topology` directly instead of `linesweeper::binary_op` because
+        // the latter accepts only a single global `FillRule`; we need one per operand.
+        let topology = Topology::from_paths_binary(&a, &b, eps).map_err(|e| e.to_string())?;
         let inside = |w: &BinaryWindingNumber| {
             let ia = winding_inside(w.shape_a, fill_rule_a);
             let ib = winding_inside(w.shape_b, fill_rule_b);
@@ -93,14 +82,14 @@ pub fn path_bool(args: PathBoolArgs) -> Result<PathBoolOutput, BoolError> {
                 BinaryOp::Difference => ia && !ib,
             }
         };
-        Ok::<_, String>(top.contours(inside))
+        Ok::<_, String>(topology.contours(inside))
     }));
 
     let contours = match result {
         Ok(Ok(c)) => c,
-        Ok(Err(msg)) => return Err(BoolError::LinesweeperFailed(msg)),
+        Ok(Err(msg)) => return Err(PathBoolErr::LinesweeperFailed(msg)),
         Err(_) => {
-            return Err(BoolError::LinesweeperFailed(
+            return Err(PathBoolErr::LinesweeperFailed(
                 "linesweeper panicked".into(),
             ));
         }
@@ -203,8 +192,6 @@ mod tests {
             && approx_eq(actual.3, expected.3)
     }
 
-    // ---- Step A4: four ops on overlapping unit squares ----
-
     #[test]
     fn union_of_overlapping_squares() {
         // a = [0,0] -> [1,1]; b = [0.5,0.5] -> [1.5,1.5]
@@ -257,11 +244,7 @@ mod tests {
 
     #[test]
     fn disjoint_union_yields_two_subpaths() {
-        let r = run(
-            rect(0.0, 0.0, 1.0, 1.0),
-            rect(2.0, 2.0, 3.0, 3.0),
-            "union",
-        );
+        let r = run(rect(0.0, 0.0, 1.0, 1.0), rect(2.0, 2.0, 3.0, 3.0), "union");
         assert_eq!(r.subpaths.len(), 2);
     }
 
@@ -291,7 +274,7 @@ mod tests {
             eps: None,
         })
         .unwrap_err();
-        assert!(matches!(err, BoolError::InvalidOp(_)));
+        assert!(matches!(err, PathBoolErr::InvalidOp(_)));
     }
 
     #[test]
@@ -305,7 +288,7 @@ mod tests {
             eps: None,
         })
         .unwrap_err();
-        assert!(matches!(err, BoolError::InvalidFillRule(_)));
+        assert!(matches!(err, PathBoolErr::InvalidFillRule(_)));
 
         let err = path_bool(PathBoolArgs {
             a: rect(0.0, 0.0, 1.0, 1.0),
@@ -316,10 +299,8 @@ mod tests {
             eps: None,
         })
         .unwrap_err();
-        assert!(matches!(err, BoolError::InvalidFillRule(_)));
+        assert!(matches!(err, PathBoolErr::InvalidFillRule(_)));
     }
-
-    // ---- Step A5: edge cases ----
 
     #[test]
     fn empty_b_truth_table() {
@@ -386,7 +367,7 @@ mod tests {
             eps: None,
         })
         .unwrap_err();
-        assert!(matches!(err, BoolError::OpenSubpath));
+        assert!(matches!(err, PathBoolErr::OpenSubpath));
     }
 
     #[test]
@@ -417,12 +398,10 @@ mod tests {
         assert_eq!(auto.subpaths.len(), with.subpaths.len());
     }
 
-    // ---- Per-operand fill rules ----
-
     /// A rectangle that contains a smaller, oppositely-wound inner rectangle.
     /// Under non-zero this is a square with a square hole; under even-odd
     /// (which ignores winding direction) it's the same; the difference
-    /// surfaces only when the inner rectangle has the *same* direction as
+    /// surfaces only when the inner rectangle has the same direction as
     /// the outer one — that's a self-overlapping "doubly-wound" shape, which
     /// non-zero treats as fully filled and even-odd treats as an annulus.
     fn doubly_wound_annulus() -> WirePath {
@@ -461,7 +440,13 @@ mod tests {
         let a = doubly_wound_annulus();
         let probe = rect(1.5, 1.5, 2.5, 2.5);
 
-        let nz = run_with(a.clone(), probe.clone(), "intersection", "non-zero", "non-zero");
+        let nz = run_with(
+            a.clone(),
+            probe.clone(),
+            "intersection",
+            "non-zero",
+            "non-zero",
+        );
         let eo = run_with(a, probe, "intersection", "even-odd", "non-zero");
 
         let nz_bb = bbox(&nz).expect("non-zero result should fill the probe");
@@ -483,7 +468,13 @@ mod tests {
         let probe = rect(1.5, 1.5, 2.5, 2.5);
         let b = doubly_wound_annulus();
 
-        let nz = run_with(probe.clone(), b.clone(), "intersection", "non-zero", "non-zero");
+        let nz = run_with(
+            probe.clone(),
+            b.clone(),
+            "intersection",
+            "non-zero",
+            "non-zero",
+        );
         let eo = run_with(probe, b, "intersection", "non-zero", "even-odd");
 
         assert!(

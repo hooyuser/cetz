@@ -2,8 +2,8 @@ use ciborium::de::from_reader;
 use ciborium::ser::into_writer;
 use serde::Deserialize;
 use serde::Serialize;
-use wasm_minimal_protocol::*;
 use std::cmp;
+use wasm_minimal_protocol::*;
 
 mod layout;
 mod path_bool;
@@ -118,15 +118,17 @@ struct Bounds {
 fn aabb(init: Option<Bounds>, pts: Vec<Point>) -> Result<Bounds, String> {
     let mut bounds = match init {
         Some(init) => init,
-        None => match pts.first() {
-            Some(p) => Bounds {
-                low: p.iter().take(3).cloned().collect(),
-                high: p.iter().take(3).cloned().collect(),
-            },
-            None => {
-                return Err("Cannot compute AABB: Point list is empty and no initial bounds were provided.".to_string());
+        None => {
+            match pts.first() {
+                Some(p) => Bounds {
+                    low: p.iter().take(3).cloned().collect(),
+                    high: p.iter().take(3).cloned().collect(),
+                },
+                None => {
+                    return Err("Cannot compute AABB: Point list is empty and no initial bounds were provided.".to_string());
+                }
             }
-        },
+        }
     };
     for pt in pts {
         for dim in 0..cmp::min(3, pt.len()) {

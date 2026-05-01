@@ -7,22 +7,10 @@
 
 #let cetz-core = plugin("/cetz-core/cetz_core.wasm")
 
-// =============================================================================
-// Internal helpers
-// =============================================================================
-
-/// Step C1: Run a CeTZ body through `process.element`, filter marks/hidden
-/// drawables, and collect every path drawable's subpaths into a single
-/// flat 3D path (an array of `(origin, closed, segments)` triples), along
-/// with the set of `fill-rule` values that the contributing path drawables
-/// carried — used downstream by `_infer-fill-rule` to mimic the implicit
-/// `compound-path` that wraps each operand.
-///
-/// - ctx (ctx): The current canvas context.
-/// - body (elements): The CeTZ body to walk.
-/// - ignore-marks (bool): Drop drawables tagged as marks.
-/// - ignore-hidden (bool): Drop drawables tagged as hidden.
-/// -> (ctx, path3d, fill-rules)
+// Runs a CeTZ body through `process.element`, filters marks/hidden drawables,
+// and collects every path drawable's subpaths into a flat 3D path (an array
+// of `(origin, closed, segments)` triples) plus the fill-rules observed across
+// those drawables.
 #let _collect-path3d(ctx, body, ignore-marks: true, ignore-hidden: true) = {
   let subpaths = ()
   let fill-rules = ()
@@ -43,20 +31,10 @@
   return (ctx, subpaths, fill-rules)
 }
 
-/// Pick a fill-rule for one operand, mimicking how a hypothetical
-/// `compound-path(operand)` wrapper would resolve it:
-///
-/// - If the user passed an explicit value (not `auto`), use it.
-/// - Else if every contributing path drawable agrees on a single
-///   fill-rule, inherit that one.
-/// - Else fall back to the path-bool element's own resolved style — same
-///   as `compound-path` defaulting to the style root when no explicit
-///   `fill-rule:` is given.
-///
-/// - arg (auto, string): The user-supplied `fill-rule-a` / `fill-rule-b`.
-/// - observed (array): Fill-rules seen across the operand's drawables.
-/// - default (string): Style-resolved fallback.
-/// -> string
+// Picks a fill-rule for one operand:
+// - If the user passed an explicit value (not `auto`), use it.
+// - Else if every contributing path drawable agrees on a single fill-rule, inherit that one.
+// - Else fall back to the style default.
 #let _infer-fill-rule(arg, observed, default) = {
   if arg != auto {
     return arg
@@ -68,13 +46,8 @@
   return default
 }
 
-/// Step C2: Project a CeTZ 3D path to a 2D wire path. Captures the z value
-/// of the first vertex and asserts every other vertex shares it (within
-/// `tol`). Open subpaths are rejected immediately.
-///
-/// - path3d (path3d): The CeTZ 3D path.
-/// - tol (float): Tolerance for z-coplanarity.
-/// -> (wire-path, z0)
+// Projects a CeTZ 3D path to a 2D wire path, asserting all vertices share the
+// same z-plane (within `tol`) and all subpaths are closed.
 #let _path3d-to-wire2d(path3d, tol: 1e-6) = {
   if path3d.len() == 0 {
     return ((subpaths: ()), 0.0)
@@ -117,17 +90,12 @@
     ))
   }
 
-  assert.eq(z-mismatch, false, message: "path-bool: all input vertices must lie in a single z-plane.")
+  assert(not z-mismatch, message: "path-bool: all input vertices must lie in a single z-plane.")
 
   return ((subpaths: wire-subpaths), z0)
 }
 
-/// Step C2 (inverse): inject z0 back into a 2D wire path to produce a CeTZ
-/// 3D path.
-///
-/// - wire (wire-path): The 2D wire path.
-/// - z0 (float): The z value to assign to every vertex.
-/// -> path3d
+// Injects z0 back into a 2D wire path to produce a CeTZ 3D path.
 #let _wire2d-to-path3d(wire, z0) = {
   let inflate(v) = (v.at(0), v.at(1), z0)
   return wire.subpaths.map(sp => {
@@ -144,14 +112,9 @@
   })
 }
 
-// =============================================================================
-// Public draw function
-// =============================================================================
-
 /// Performs a boolean operation on the paths produced by two CeTZ bodies.
 /// The supported operations are `"union"`, `"intersection"`, `"difference"`,
-/// and `"xor"`. The geometry engine is the `linesweeper` Rust crate,
-/// called through CeTZ's WASM module.
+/// and `"xor"`.
 ///
 /// ```example
 /// path-bool(
@@ -171,23 +134,15 @@
 /// from the operand: if every path drawable produced by the body agrees on
 /// one fill-rule (e.g. the body is a single `compound-path(..., fill-rule:
 /// "even-odd")`), that value is used; otherwise it falls back to
-/// `path-bool`'s own resolved style (same fallback `compound-path` itself
-/// uses).
-///
-/// == Anchors
-/// Standard path anchors (start, end, mid, percentage along the path) plus
-/// the bounding-box anchors derived from the result.
+/// `path-bool`'s own resolved style.
 ///
 /// - a (elements): First operand body.
 /// - b (elements): Second operand body.
 /// - op (string): One of `"union"`, `"intersection"`, `"difference"`, `"xor"`.
-/// - fill-rule-a (auto, string): `"non-zero"` or `"even-odd"`, applied to `a`'s
-///   winding number. `auto` infers from the operand (see above).
-/// - fill-rule-b (auto, string): Same as `fill-rule-a`, but for `b`.
-/// - eps (auto, float): Numerical accuracy. `auto` uses an automatic,
-///   bbox-derived choice (matching `linesweeper::binary_op`'s default). A
-///   user-supplied float overrides it.
-/// - ignore-marks (bool): Drop arrowheads/marks from the inputs.
+/// - fill-rule-a (auto, string): `"non-zero"` or `"even-odd"`, applied to `a`. If `auto`, inferred from `a`'s drawables
+/// - fill-rule-b (auto, string): `"non-zero"` or `"even-odd"`, applied to `b`. If `auto`, inferred from `b`'s drawables
+/// - eps (auto, float): Numerical accuracy. `auto` uses an automatically determined value.
+/// - ignore-marks (bool): Drop marks from the inputs.
 /// - ignore-hidden (bool): Drop hidden elements from the inputs.
 /// - name (none, string):
 /// - ..style (style):
@@ -206,7 +161,7 @@
   assert.eq(
     style.pos(),
     (),
-    message: "Unexpected positional arguments: " + repr(style.pos()),
+    message: "path-bool: unexpected positional arguments: " + repr(style.pos()),
   )
   let style = style.named()
 
@@ -220,8 +175,7 @@
   let validate-fill-rule(name, value) = {
     assert(
       value == auto or value in ("non-zero", "even-odd"),
-      message: "path-bool: invalid " + name + " " + repr(value)
-        + ". Expected `auto`, \"non-zero\", or \"even-odd\".",
+      message: "path-bool: invalid " + name + " " + repr(value) + ". Expected `auto`, \"non-zero\", or \"even-odd\".",
     )
   }
   validate-fill-rule("fill-rule-a", fill-rule-a)

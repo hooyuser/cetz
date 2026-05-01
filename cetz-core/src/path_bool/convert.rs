@@ -3,15 +3,15 @@
 
 use kurbo::{BezPath, PathEl, Point};
 
-use crate::path_bool::error::BoolError;
+use crate::path_bool::error::PathBoolErr;
 use crate::path_bool::wire::{WirePath, WireSegment, WireSubpath};
 
 /// Convert a [`WirePath`] to a [`kurbo::BezPath`]. Open subpaths are rejected.
-pub fn wire_to_bez(path: &WirePath) -> Result<BezPath, BoolError> {
+pub fn wire_to_bez(path: &WirePath) -> Result<BezPath, PathBoolErr> {
     let mut bez = BezPath::new();
     for subpath in &path.subpaths {
         if !subpath.closed {
-            return Err(BoolError::OpenSubpath);
+            return Err(PathBoolErr::OpenSubpath);
         }
         bez.move_to(Point::new(subpath.origin[0], subpath.origin[1]));
         for seg in &subpath.segments {
@@ -35,15 +35,15 @@ pub fn wire_to_bez(path: &WirePath) -> Result<BezPath, BoolError> {
 
 /// Convert a [`kurbo::BezPath`] back to the wire format. `QuadTo` segments
 /// (which CeTZ does not natively support) are elevated to cubic.
-pub fn bez_to_wire(path: &BezPath) -> Result<WirePath, BoolError> {
+pub fn bez_to_wire(path: &BezPath) -> Result<WirePath, PathBoolErr> {
     let mut subpaths: Vec<WireSubpath> = Vec::new();
     let mut current: Option<WireSubpath> = None;
     let mut current_pt: Option<Point> = None;
 
     fn last_subpath_mut<'a>(
         current: &'a mut Option<WireSubpath>,
-    ) -> Result<&'a mut WireSubpath, BoolError> {
-        current.as_mut().ok_or(BoolError::MalformedPath)
+    ) -> Result<&'a mut WireSubpath, PathBoolErr> {
+        current.as_mut().ok_or(PathBoolErr::MalformedPath)
     }
 
     for el in path.iter() {
@@ -65,7 +65,7 @@ pub fn bez_to_wire(path: &BezPath) -> Result<WirePath, BoolError> {
                 current_pt = Some(p);
             }
             PathEl::QuadTo(q, p) => {
-                let p0 = current_pt.ok_or(BoolError::MalformedPath)?;
+                let p0 = current_pt.ok_or(PathBoolErr::MalformedPath)?;
                 let sp = last_subpath_mut(&mut current)?;
                 // Quadratic -> cubic elevation:
                 //   C1 = P0 + 2/3 (Q - P0)
@@ -74,10 +74,7 @@ pub fn bez_to_wire(path: &BezPath) -> Result<WirePath, BoolError> {
                     p0.x + 2.0 / 3.0 * (q.x - p0.x),
                     p0.y + 2.0 / 3.0 * (q.y - p0.y),
                 );
-                let c2 = Point::new(
-                    p.x + 2.0 / 3.0 * (q.x - p.x),
-                    p.y + 2.0 / 3.0 * (q.y - p.y),
-                );
+                let c2 = Point::new(p.x + 2.0 / 3.0 * (q.x - p.x), p.y + 2.0 / 3.0 * (q.y - p.y));
                 sp.segments.push(WireSegment::Cubic {
                     c1: [c1.x, c1.y],
                     c2: [c2.x, c2.y],
@@ -234,6 +231,6 @@ mod tests {
         let mut wire = rect_wire();
         wire.subpaths[0].closed = false;
         let err = wire_to_bez(&wire).unwrap_err();
-        assert!(matches!(err, BoolError::OpenSubpath));
+        assert!(matches!(err, PathBoolErr::OpenSubpath));
     }
 }
