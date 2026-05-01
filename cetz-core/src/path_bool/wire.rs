@@ -37,9 +37,12 @@ pub struct PathBoolArgs {
     pub a: WirePath,
     pub b: WirePath,
     pub op: String,
-    pub fill_rule: String,
-    /// `None` -> use linesweeper's automatic eps (`binary_op`).
-    /// `Some(eps)` -> call `binary_op_with_eps(eps)`.
+    /// Fill rule applied to `a`'s winding number when classifying regions.
+    pub fill_rule_a: String,
+    /// Fill rule applied to `b`'s winding number when classifying regions.
+    pub fill_rule_b: String,
+    /// `None` -> compute eps automatically from the combined bbox (mirrors
+    /// linesweeper's own default in `binary_op`). `Some(eps)` -> use as-is.
     pub eps: Option<f64>,
 }
 
@@ -72,7 +75,8 @@ mod tests {
             a: rect_wire(),
             b: rect_wire(),
             op: "union".into(),
-            fill_rule: "non-zero".into(),
+            fill_rule_a: "non-zero".into(),
+            fill_rule_b: "even-odd".into(),
             eps: None,
         };
 
@@ -84,7 +88,8 @@ mod tests {
         assert_eq!(decoded.a, original.a);
         assert_eq!(decoded.b, original.b);
         assert_eq!(decoded.op, original.op);
-        assert_eq!(decoded.fill_rule, original.fill_rule);
+        assert_eq!(decoded.fill_rule_a, original.fill_rule_a);
+        assert_eq!(decoded.fill_rule_b, original.fill_rule_b);
         assert_eq!(decoded.eps, original.eps);
     }
 

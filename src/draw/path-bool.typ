@@ -13,15 +13,19 @@
 
 /// Step C1: Run a CeTZ body through `process.element`, filter marks/hidden
 /// drawables, and collect every path drawable's subpaths into a single
-/// flat 3D path (an array of `(origin, closed, segments)` triples).
+/// flat 3D path (an array of `(origin, closed, segments)` triples), along
+/// with the set of `fill-rule` values that the contributing path drawables
+/// carried — used downstream by `_infer-fill-rule` to mimic the implicit
+/// `compound-path` that wraps each operand.
 ///
 /// - ctx (ctx): The current canvas context.
 /// - body (elements): The CeTZ body to walk.
 /// - ignore-marks (bool): Drop drawables tagged as marks.
 /// - ignore-hidden (bool): Drop drawables tagged as hidden.
-/// -> (ctx, path3d)
+/// -> (ctx, path3d, fill-rules)
 #let _collect-path3d(ctx, body, ignore-marks: true, ignore-hidden: true) = {
   let subpaths = ()
+  let fill-rules = ()
   for element in body {
     let r = process.element(ctx, element)
     if r != none {
@@ -31,10 +35,37 @@
       if ignore-marks { tags.push(drawable.TAG.mark) }
 
       let drawables = drawable.filter-tagged(r.drawables, ..tags)
-      subpaths += drawables.filter(d => d.type == "path").map(d => d.segments).join()
+      let path-drawables = drawables.filter(d => d.type == "path")
+      subpaths += path-drawables.map(d => d.segments).join()
+      fill-rules += path-drawables.map(d => d.fill-rule)
     }
   }
-  return (ctx, subpaths)
+  return (ctx, subpaths, fill-rules)
+}
+
+/// Pick a fill-rule for one operand, mimicking how a hypothetical
+/// `compound-path(operand)` wrapper would resolve it:
+///
+/// - If the user passed an explicit value (not `auto`), use it.
+/// - Else if every contributing path drawable agrees on a single
+///   fill-rule, inherit that one.
+/// - Else fall back to the path-bool element's own resolved style — same
+///   as `compound-path` defaulting to the style root when no explicit
+///   `fill-rule:` is given.
+///
+/// - arg (auto, string): The user-supplied `fill-rule-a` / `fill-rule-b`.
+/// - observed (array): Fill-rules seen across the operand's drawables.
+/// - default (string): Style-resolved fallback.
+/// -> string
+#let _infer-fill-rule(arg, observed, default) = {
+  if arg != auto {
+    return arg
+  }
+  let unique = observed.dedup()
+  if unique.len() == 1 {
+    return unique.first()
+  }
+  return default
 }
 
 /// Step C2: Project a CeTZ 3D path to a 2D wire path. Captures the z value
@@ -134,6 +165,15 @@
 /// All input subpaths must be closed and lie in a single z-plane. The output
 /// is a single path drawable in the z-plane of the first input.
 ///
+/// Each operand has its own fill-rule, which decides how its self-overlapping
+/// or nested subpaths are interpreted as a filled region *before* the
+/// boolean operation runs. By default (`auto`) the fill-rule is inferred
+/// from the operand: if every path drawable produced by the body agrees on
+/// one fill-rule (e.g. the body is a single `compound-path(..., fill-rule:
+/// "even-odd")`), that value is used; otherwise it falls back to
+/// `path-bool`'s own resolved style (same fallback `compound-path` itself
+/// uses).
+///
 /// == Anchors
 /// Standard path anchors (start, end, mid, percentage along the path) plus
 /// the bounding-box anchors derived from the result.
@@ -141,10 +181,12 @@
 /// - a (elements): First operand body.
 /// - b (elements): Second operand body.
 /// - op (string): One of `"union"`, `"intersection"`, `"difference"`, `"xor"`.
-/// - fill-rule (string): `"non-zero"` or `"even-odd"`. Used to interpret each
-///   input as a filled region before the operation.
-/// - eps (auto, float): Numerical accuracy. `auto` uses linesweeper's
-///   automatic, bbox-derived choice. A user-supplied float overrides it.
+/// - fill-rule-a (auto, string): `"non-zero"` or `"even-odd"`, applied to `a`'s
+///   winding number. `auto` infers from the operand (see above).
+/// - fill-rule-b (auto, string): Same as `fill-rule-a`, but for `b`.
+/// - eps (auto, float): Numerical accuracy. `auto` uses an automatic,
+///   bbox-derived choice (matching `linesweeper::binary_op`'s default). A
+///   user-supplied float overrides it.
 /// - ignore-marks (bool): Drop arrowheads/marks from the inputs.
 /// - ignore-hidden (bool): Drop hidden elements from the inputs.
 /// - name (none, string):
@@ -153,7 +195,8 @@
   a,
   b,
   op: "difference",
-  fill-rule: "non-zero",
+  fill-rule-a: auto,
+  fill-rule-b: auto,
   eps: auto,
   ignore-marks: true,
   ignore-hidden: true,
@@ -174,20 +217,25 @@
       + ". Expected one of: \"union\", \"intersection\", \"difference\", \"xor\"",
   )
 
-  assert(
-    fill-rule in ("non-zero", "even-odd"),
-    message: "path-bool: invalid fill-rule " + repr(fill-rule) + ". Expected one of: \"non-zero\", \"even-odd\"",
-  )
+  let validate-fill-rule(name, value) = {
+    assert(
+      value == auto or value in ("non-zero", "even-odd"),
+      message: "path-bool: invalid " + name + " " + repr(value)
+        + ". Expected `auto`, \"non-zero\", or \"even-odd\".",
+    )
+  }
+  validate-fill-rule("fill-rule-a", fill-rule-a)
+  validate-fill-rule("fill-rule-b", fill-rule-b)
 
   return (
     ctx => {
-      let (_, a-path3d) = _collect-path3d(
+      let (_, a-path3d, a-fill-rules) = _collect-path3d(
         ctx,
         a,
         ignore-marks: ignore-marks,
         ignore-hidden: ignore-hidden,
       )
-      let (_, b-path3d) = _collect-path3d(
+      let (_, b-path3d, b-fill-rules) = _collect-path3d(
         ctx,
         b,
         ignore-marks: ignore-marks,
@@ -202,11 +250,16 @@
         message: "path-bool: input paths must lie in the same z-plane; got z=" + repr(az) + " and z=" + repr(bz),
       )
 
+      let resolved-style = styles.resolve(ctx.style, merge: style, root: "path-bool")
+      let resolved-fill-rule-a = _infer-fill-rule(fill-rule-a, a-fill-rules, resolved-style.fill-rule)
+      let resolved-fill-rule-b = _infer-fill-rule(fill-rule-b, b-fill-rules, resolved-style.fill-rule)
+
       let result = call_wasm(cetz-core.path_bool_func, (
         a: a-wire,
         b: b-wire,
         op: op,
-        fill_rule: fill-rule,
+        fill_rule_a: resolved-fill-rule-a,
+        fill_rule_b: resolved-fill-rule-b,
         eps: if eps == auto { none } else { eps },
       ))
 
@@ -226,12 +279,10 @@
         )
       }
 
-      let style = styles.resolve(ctx.style, merge: style, root: "path-bool")
-
       let drawables = drawable.path(
-        fill: style.fill,
-        fill-rule: fill-rule,
-        stroke: style.stroke,
+        fill: resolved-style.fill,
+        fill-rule: resolved-style.fill-rule,
+        stroke: resolved-style.stroke,
         path3d,
       )
 
