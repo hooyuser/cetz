@@ -3,8 +3,6 @@
 //! Wraps the [`linesweeper`](https://crates.io/crates/linesweeper) crate
 //! behind a CBOR wire format suitable for the Typst <-> WASM boundary.
 
-mod convert;
-mod error;
 mod op;
 mod wire;
 
