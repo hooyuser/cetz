@@ -235,10 +235,12 @@
       if result.area_path != none {
         let path3d = _wire2d-to-path3d(result.area_path, z0)
         if path3d.len() > 0 {
-          let d = body-drawable + (
-            segments: path3d,
+          let d = drawable.path(
             fill: body-drawable.fill,
+            fill-rule: body-drawable.fill-rule,
             stroke: none,
+            tags: body-drawable.at("tags", default: ()),
+            path3d,
           )
           drawables.push(d)
         }
@@ -246,10 +248,12 @@
       if result.line_path != none {
         let path3d = _wire2d-to-path3d(result.line_path, z0)
         if path3d.len() > 0 {
-          let d = body-drawable + (
-            segments: path3d,
+          let d = drawable.path(
             fill: none,
+            fill-rule: body-drawable.fill-rule,
             stroke: body-drawable.stroke,
+            tags: body-drawable.at("tags", default: ()),
+            path3d,
           )
           drawables.push(d)
         }
