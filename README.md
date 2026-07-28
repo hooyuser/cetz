@@ -163,3 +163,4 @@ To run all tests you can run the `just test` target. You need to have
 - [neural-netz](https://github.com/edgaremy/neural-netz) Visualize neural network architectures.
 - [energy-dia](https://github.com/Typsium/energy-dia) Library for creating professional energy diagrams in chemistry and physics.
 - [conchord](https://github.com/sitandr/conchord) Package for writing lyrics with chords that generates fretboard diagrams.
+- [gribouille](https://github.com/mcanouil/gribouille) Create elegant graphics with the Grammar of Graphics for Typst.
