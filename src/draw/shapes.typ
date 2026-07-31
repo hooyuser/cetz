@@ -1044,6 +1044,45 @@
   },)
 }
 
+#let _is-equation-content(body) = {
+  if type(body) != type([]) {
+    return false
+  }
+
+  if body.func() == math.equation {
+    return true
+  }
+
+  // A text style wraps its content in a `styled` element. Unwrap these
+  // elements so equations such as `text(size: 20pt, $x$)` are detected too.
+  let fields = body.fields()
+  if "child" in fields and "styles" in fields {
+    return _is-equation-content(fields.child)
+  }
+
+  false
+}
+
+#let _measure-equation(ctx, equation) = {
+  let bounded = text(top-edge: "bounds", bottom-edge: "bounds", equation)
+  let size = std.measure(bounded)
+
+  // A zero-width box with its baseline at the top extends entirely below its
+  // baseline. Making it deeper than the equation and placing both boxes on the
+  // same baseline lets us recover the equation's ascent from the combined box.
+  let probe-descent = size.height + 1pt
+  let probe = box(width: 0pt, height: probe-descent, baseline: 100%)
+  let combined = box[#box(bounded)#probe]
+  let ascent = std.measure(combined).height - probe-descent
+
+  (
+    body: bounded,
+    width: calc.abs(size.width / ctx.length),
+    ascent: calc.abs(ascent / ctx.length),
+    descent: calc.abs((size.height - ascent) / ctx.length),
+  )
+}
+
 /// Positions Typst content in the canvas. Note that the content itself is not transformed only its position is.
 ///
 /// ```example
@@ -1126,6 +1165,7 @@
     } else {
       body
     }
+    let is-equation = _is-equation-content(body)
 
     let (ctx, a) = coordinate.resolve(ctx, a)
     let b = b
@@ -1149,16 +1189,35 @@
       body = std.scale(x: sx * 100%, y: sy * 100%, body, reflow: true)
     }
 
-    // Compute the baseline offset
-    let (_, line-baseline-height) = util.measure(ctx, text(top-edge: "cap-height", bottom-edge: "baseline",
-      [ #show linebreak: [ ]; #body]))
-    let (_, line-bounds-height) = util.measure(ctx, text(top-edge: "cap-height", bottom-edge: "bounds",
-      [ #show linebreak: [ ]; #body]))
-    let baseline-offset = line-bounds-height - line-baseline-height
+    let equation-metrics = if is-equation {
+      _measure-equation(ctx, body)
+    }
+
+    // Compute the baseline offset. Equations need a probe because Typst's text
+    // edge measurements do not expose their baseline correctly.
+    let baseline-offset = if equation-metrics != none {
+      equation-metrics.descent
+    } else {
+      let (_, line-baseline-height) = util.measure(ctx, text(top-edge: "cap-height", bottom-edge: "baseline",
+        [ #show linebreak: [ ]; #body]))
+      let (_, line-bounds-height) = util.measure(ctx, text(top-edge: "cap-height", bottom-edge: "bounds",
+        [ #show linebreak: [ ]; #body]))
+      line-bounds-height - line-baseline-height
+    }
+
+    let layout-body = if equation-metrics != none {
+      equation-metrics.body
+    } else {
+      text(top-edge: "cap-height", bottom-edge: "baseline", body)
+    }
 
     // Size of the bounding box
     let (content-width, content-height, ..) = if auto-size {
-      util.measure(ctx, text(top-edge: "cap-height", bottom-edge: "baseline", body))
+      if equation-metrics != none {
+        (equation-metrics.width, equation-metrics.ascent)
+      } else {
+        util.measure(ctx, layout-body)
+      }
     } else {
       vector.sub(b, a)
     }
@@ -1314,7 +1373,7 @@
               bottom: padding.at("bottom", default: 0) * ctx.length,
               right: padding.at("right", default: 0) * ctx.length,
             ),
-            text(top-edge: "cap-height", bottom-edge: "baseline", body)
+            layout-body
           )
         )
       )
