@@ -13,6 +13,7 @@ use crate::path_ops::wire::{WirePath, WireSegment, WireSubpath};
 
 #[derive(Debug, Clone)]
 struct FlatSubpath {
+    original_idx: usize,
     closed: bool,
     points: Vec<Point>,
 }
@@ -21,6 +22,116 @@ struct FlatSubpath {
 struct FlatLine {
     p0: Point,
     p1: Point,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineBounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoundaryEntry {
+    line: FlatLine,
+    bounds: LineBounds,
+}
+
+#[derive(Debug, Clone)]
+struct BoundaryIndex {
+    entries: Vec<BoundaryEntry>,
+}
+
+impl LineBounds {
+    fn from_line(line: FlatLine) -> Self {
+        Self {
+            min_x: line.p0.x.min(line.p1.x),
+            min_y: line.p0.y.min(line.p1.y),
+            max_x: line.p0.x.max(line.p1.x),
+            max_y: line.p0.y.max(line.p1.y),
+        }
+    }
+
+    fn from_point(p: Point, tol: f64) -> Self {
+        Self {
+            min_x: p.x - tol,
+            min_y: p.y - tol,
+            max_x: p.x + tol,
+            max_y: p.y + tol,
+        }
+    }
+
+    fn expand(self, tol: f64) -> Self {
+        Self {
+            min_x: self.min_x - tol,
+            min_y: self.min_y - tol,
+            max_x: self.max_x + tol,
+            max_y: self.max_y + tol,
+        }
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            min_x: self.min_x.min(other.min_x),
+            min_y: self.min_y.min(other.min_y),
+            max_x: self.max_x.max(other.max_x),
+            max_y: self.max_y.max(other.max_y),
+        }
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.min_x <= other.max_x
+            && self.max_x >= other.min_x
+            && self.min_y <= other.max_y
+            && self.max_y >= other.min_y
+    }
+}
+
+impl BoundaryIndex {
+    fn new(lines: Vec<FlatLine>) -> Self {
+        let mut entries: Vec<_> = lines
+            .into_iter()
+            .map(|line| BoundaryEntry {
+                line,
+                bounds: LineBounds::from_line(line),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.bounds.min_y.partial_cmp(&b.bounds.min_y).unwrap());
+        Self { entries }
+    }
+
+    fn any_overlapping(&self, bounds: LineBounds) -> bool {
+        for entry in &self.entries {
+            if entry.bounds.min_y > bounds.max_y {
+                break;
+            }
+            if entry.bounds.overlaps(bounds) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn line_may_touch_boundary(&self, line: FlatLine, tol: f64) -> bool {
+        self.any_overlapping(LineBounds::from_line(line).expand(tol))
+    }
+
+    fn point_on_boundary(&self, p: Point, tol: f64) -> bool {
+        let tol_sq = tol * tol;
+        let bounds = LineBounds::from_point(p, tol);
+        for entry in &self.entries {
+            if entry.bounds.min_y > bounds.max_y {
+                break;
+            }
+            if entry.bounds.overlaps(bounds)
+                && point_to_segment_distance_sq(p, entry.line.p0, entry.line.p1) <= tol_sq
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 fn close_enough(a: Point, b: Point, tol: f64) -> bool {
@@ -40,13 +151,6 @@ fn point_to_segment_distance_sq(p: Point, a: Point, b: Point) -> f64 {
     let ap = p - a;
     let t = (ap.dot(ab) / len_sq).clamp(0.0, 1.0);
     p.distance_squared(a + ab * t)
-}
-
-fn point_on_boundary(p: Point, boundary: &[FlatLine], tol: f64) -> bool {
-    let tol_sq = tol * tol;
-    boundary
-        .iter()
-        .any(|line| point_to_segment_distance_sq(p, line.p0, line.p1) <= tol_sq)
 }
 
 fn subpath_to_bez(subpath: &WireSubpath) -> BezPath {
@@ -71,7 +175,8 @@ fn subpath_to_bez(subpath: &WireSubpath) -> BezPath {
 fn flatten_wire(path: &WirePath, tolerance: f64, tol: f64) -> Vec<FlatSubpath> {
     path.subpaths
         .iter()
-        .filter_map(|subpath| {
+        .enumerate()
+        .filter_map(|(original_idx, subpath)| {
             let bez = subpath_to_bez(subpath);
             let mut points = Vec::new();
             let origin = Point::new(subpath.origin[0], subpath.origin[1]);
@@ -106,6 +211,7 @@ fn flatten_wire(path: &WirePath, tolerance: f64, tol: f64) -> Vec<FlatSubpath> {
                 points.push(origin);
             }
             (points.len() >= 2).then_some(FlatSubpath {
+                original_idx,
                 closed: subpath.closed,
                 points,
             })
@@ -141,62 +247,116 @@ fn push_event_t(ts: &mut Vec<f64>, line: FlatLine, y: f64, x: f64) {
     }
 }
 
+fn add_clip_runs(segments: &mut Segments, flat_clip: &[FlatSubpath], bounds: LineBounds, eps: f64) {
+    for subpath in flat_clip {
+        let lines: Vec<_> = lines_for_subpath(subpath).collect();
+        let mut run_start: Option<usize> = None;
+        for (line_idx, line) in lines.iter().copied().enumerate() {
+            let overlaps = !close_enough(line.p0, line.p1, eps)
+                && LineBounds::from_line(line).expand(eps).overlaps(bounds);
+            match (run_start, overlaps) {
+                (None, true) => run_start = Some(line_idx),
+                (Some(start), false) => {
+                    add_open_line_run(segments, &lines, start, line_idx);
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(start) = run_start {
+            add_open_line_run(segments, &lines, start, lines.len());
+        }
+    }
+}
+
+fn add_open_line_run(segments: &mut Segments, lines: &[FlatLine], start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    let mut points = Vec::with_capacity(end - start + 1);
+    points.push(lines[start].p0);
+    points.extend(lines[start..end].iter().map(|line| line.p1));
+    segments.add_points(points);
+}
+
 fn collect_split_ts(
     flat_clip: &[FlatSubpath],
-    flat_body: &[FlatSubpath],
+    body_lines: &[Vec<FlatLine>],
+    boundary: &BoundaryIndex,
+    boundary_tol: f64,
     eps: f64,
 ) -> Result<Vec<Vec<Vec<f64>>>, PathOpsErr> {
-    let mut segments = Segments::default();
-    for subpath in flat_clip {
-        let mut points = subpath.points.clone();
-        if subpath.closed
-            && points.len() > 1
-            && close_enough(*points.first().unwrap(), *points.last().unwrap(), eps)
-        {
-            points.pop();
-        }
-        if points.len() >= 2 {
-            segments.add_closed_polyline(points);
+    let mut split_ts: Vec<Vec<Vec<f64>>> = body_lines
+        .iter()
+        .map(|lines| lines.iter().map(|_| vec![0.0, 1.0]).collect())
+        .collect();
+
+    let mut candidate_bounds: Option<LineBounds> = None;
+    for lines in body_lines {
+        for line in lines {
+            if close_enough(line.p0, line.p1, eps)
+                || !boundary.line_may_touch_boundary(*line, boundary_tol)
+            {
+                continue;
+            }
+            let bounds = LineBounds::from_line(*line).expand(boundary_tol);
+            candidate_bounds = Some(match candidate_bounds {
+                Some(acc) => acc.union(bounds),
+                None => bounds,
+            });
         }
     }
 
-    let mut split_ts: Vec<Vec<Vec<f64>>> = flat_body
-        .iter()
-        .map(|subpath| lines_for_subpath(subpath).map(|_| vec![0.0, 1.0]).collect())
-        .collect();
-    let mut saw_body_line = false;
+    let Some(candidate_bounds) = candidate_bounds else {
+        return Ok(split_ts);
+    };
+
+    let mut segments = Segments::default();
+    add_clip_runs(&mut segments, flat_clip, candidate_bounds, eps);
+
     let mut body_seg_map: HashMap<SegIdx, (usize, usize)> = HashMap::new();
 
-    for (subpath_idx, subpath) in flat_body.iter().enumerate() {
-        for (line_idx, line) in lines_for_subpath(subpath).enumerate() {
-            if close_enough(line.p0, line.p1, eps) {
-                continue;
-            }
-            let before = segments.len();
-            segments.add_points([line.p0, line.p1]);
-            if segments.len() == before {
-                continue;
-            }
-            for (pos, idx) in segments.indices().enumerate().skip(before) {
-                if pos >= segments.len() {
-                    break;
+    for (subpath_idx, lines) in body_lines.iter().enumerate() {
+        let mut run_start: Option<usize> = None;
+        for (line_idx, line) in lines.iter().copied().enumerate() {
+            let candidate = !close_enough(line.p0, line.p1, eps)
+                && boundary.line_may_touch_boundary(line, boundary_tol);
+            match (run_start, candidate) {
+                (None, true) => run_start = Some(line_idx),
+                (Some(start), false) => {
+                    add_body_run(
+                        &mut segments,
+                        &mut body_seg_map,
+                        lines,
+                        subpath_idx,
+                        start,
+                        line_idx,
+                    );
+                    run_start = None;
                 }
-                body_seg_map.insert(idx, (subpath_idx, line_idx));
+                _ => {}
             }
-            saw_body_line = true;
+        }
+        if let Some(start) = run_start {
+            add_body_run(
+                &mut segments,
+                &mut body_seg_map,
+                lines,
+                subpath_idx,
+                start,
+                lines.len(),
+            );
         }
     }
 
-    if !saw_body_line {
+    if body_seg_map.is_empty() {
         return Ok(split_ts);
     }
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         sweep::sweep(&segments, eps, |y, ev| {
             if let Some(&(subpath_idx, line_idx)) = body_seg_map.get(&ev.seg_idx) {
-                let line = lines_for_subpath(&flat_body[subpath_idx])
-                    .nth(line_idx)
-                    .expect("body line index should still exist");
+                let line = body_lines[subpath_idx][line_idx];
                 let ts = &mut split_ts[subpath_idx][line_idx];
                 push_event_t(ts, line, y, ev.x0);
                 push_event_t(ts, line, y, ev.x1);
@@ -207,6 +367,30 @@ fn collect_split_ts(
     match result {
         Ok(()) => Ok(split_ts),
         Err(_) => Err(PathOpsErr::LinesweeperFailed("linesweeper panicked".into())),
+    }
+}
+
+fn add_body_run(
+    segments: &mut Segments,
+    body_seg_map: &mut HashMap<SegIdx, (usize, usize)>,
+    lines: &[FlatLine],
+    subpath_idx: usize,
+    start: usize,
+    end: usize,
+) {
+    if start >= end {
+        return;
+    }
+    let before = segments.len();
+    add_open_line_run(segments, lines, start, end);
+    for (offset, idx) in segments
+        .indices()
+        .enumerate()
+        .skip(before)
+        .take(end - start)
+        .map(|(pos, idx)| (pos - before, idx))
+    {
+        body_seg_map.insert(idx, (subpath_idx, start + offset));
     }
 }
 
@@ -223,17 +407,20 @@ fn normalize_ts(ts: &mut Vec<f64>, line: FlatLine, eps: f64) {
 
 fn classify_interval(
     clip_bez: &BezPath,
-    boundary: &[FlatLine],
+    boundary: &BoundaryIndex,
     fill_rule: FillRule,
     mode: ClipMode,
     p: Point,
     boundary_tol: f64,
 ) -> bool {
-    let on_boundary = point_on_boundary(p, boundary, boundary_tol);
+    let on_boundary = boundary.point_on_boundary(p, boundary_tol);
+    if on_boundary {
+        return mode == ClipMode::Include;
+    }
     let inside = winding_inside(clip_bez.winding(p), fill_rule);
     match mode {
-        ClipMode::Include => inside || on_boundary,
-        ClipMode::Exclude => !inside && !on_boundary,
+        ClipMode::Include => inside,
+        ClipMode::Exclude => !inside,
     }
 }
 
@@ -344,13 +531,22 @@ pub(crate) fn clip_line_path(
     }
 
     let boundary = boundary_lines(&flat_clip);
-    let mut split_ts = collect_split_ts(&flat_clip, &flat_body, eps)?;
+    let boundary = BoundaryIndex::new(boundary);
+    let body_lines: Vec<Vec<FlatLine>> = flat_body
+        .iter()
+        .map(|sp| lines_for_subpath(sp).collect())
+        .collect();
+    let mut split_ts = collect_split_ts(&flat_clip, &body_lines, &boundary, boundary_tol, eps)?;
     let mut output = WirePath::empty();
 
     for (subpath_idx, subpath) in flat_body.iter().enumerate() {
-        let lines: Vec<_> = lines_for_subpath(subpath).collect();
+        let lines = &body_lines[subpath_idx];
         let mut chunks: Vec<Vec<Point>> = Vec::new();
+        let mut all_kept = true;
+        let mut any_kept = false;
+        let mut may_touch_boundary = false;
         for (line_idx, line) in lines.iter().copied().enumerate() {
+            may_touch_boundary |= boundary.line_may_touch_boundary(line, boundary_tol);
             let ts = &mut split_ts[subpath_idx][line_idx];
             normalize_ts(ts, line, eps);
             for pair in ts.windows(2) {
@@ -361,18 +557,27 @@ pub(crate) fn clip_line_path(
                 }
                 let mid = lerp(line.p0, line.p1, (t0 + t1) * 0.5);
                 if classify_interval(&clip_bez, &boundary, fill_rule, mode, mid, boundary_tol) {
+                    any_kept = true;
                     push_chunk(
                         &mut chunks,
                         lerp(line.p0, line.p1, t0),
                         lerp(line.p0, line.p1, t1),
                         point_tol,
                     );
+                } else {
+                    all_kept = false;
                 }
             }
         }
-        output
-            .subpaths
-            .extend(chunks_to_wire(chunks, subpath.closed, point_tol));
+        if !may_touch_boundary && all_kept && any_kept {
+            output
+                .subpaths
+                .push(body.subpaths[subpath.original_idx].clone());
+        } else if any_kept {
+            output
+                .subpaths
+                .extend(chunks_to_wire(chunks, subpath.closed, point_tol));
+        }
     }
 
     Ok(output)
@@ -402,6 +607,20 @@ mod tests {
                 origin: [a.0, a.1],
                 closed: false,
                 segments: vec![WireSegment::Line { to: [b.0, b.1] }],
+            }],
+        }
+    }
+
+    fn cubic_wire(start: (f64, f64), c1: (f64, f64), c2: (f64, f64), end: (f64, f64)) -> WirePath {
+        WirePath {
+            subpaths: vec![WireSubpath {
+                origin: [start.0, start.1],
+                closed: false,
+                segments: vec![WireSegment::Cubic {
+                    c1: [c1.0, c1.1],
+                    c2: [c2.0, c2.1],
+                    to: [end.0, end.1],
+                }],
             }],
         }
     }
@@ -464,6 +683,34 @@ mod tests {
         assert_eq!(out.subpaths.len(), 1);
         assert!(!out.subpaths[0].closed);
         assert_eq!(out.subpaths[0].origin, [0.0, 0.25]);
+    }
+
+    #[test]
+    fn include_curve_inside_rect_preserves_original_curve() {
+        let body = cubic_wire((0.2, 0.2), (0.3, 0.9), (0.7, 0.1), (0.8, 0.8));
+        let out = clip_line_path(
+            &rect_wire((0.0, 0.0), (1.0, 1.0)),
+            &body,
+            FillRule::NonZero,
+            ClipMode::Include,
+            1e-6,
+        )
+        .unwrap();
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn exclude_curve_outside_rect_preserves_original_curve() {
+        let body = cubic_wire((2.0, 0.2), (2.3, 0.9), (2.7, 0.1), (2.8, 0.8));
+        let out = clip_line_path(
+            &rect_wire((0.0, 0.0), (1.0, 1.0)),
+            &body,
+            FillRule::NonZero,
+            ClipMode::Exclude,
+            1e-6,
+        )
+        .unwrap();
+        assert_eq!(out, body);
     }
 
     #[test]
