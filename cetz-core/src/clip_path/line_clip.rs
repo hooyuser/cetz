@@ -282,7 +282,7 @@ fn add_open_line_run(segments: &mut Segments, lines: &[FlatLine], start: usize, 
 fn collect_split_ts(
     flat_clip: &[FlatSubpath],
     body_lines: &[Vec<FlatLine>],
-    boundary: &BoundaryIndex,
+    touch_candidates: &[Vec<bool>],
     boundary_tol: f64,
     eps: f64,
 ) -> Result<Vec<Vec<Vec<f64>>>, PathOpsErr> {
@@ -292,11 +292,9 @@ fn collect_split_ts(
         .collect();
 
     let mut candidate_bounds: Option<LineBounds> = None;
-    for lines in body_lines {
-        for line in lines {
-            if close_enough(line.p0, line.p1, eps)
-                || !boundary.line_may_touch_boundary(*line, boundary_tol)
-            {
+    for (lines, candidates) in body_lines.iter().zip(touch_candidates) {
+        for (line, candidate) in lines.iter().zip(candidates) {
+            if !candidate {
                 continue;
             }
             let bounds = LineBounds::from_line(*line).expand(boundary_tol);
@@ -316,11 +314,9 @@ fn collect_split_ts(
 
     let mut body_seg_map: HashMap<SegIdx, (usize, usize)> = HashMap::new();
 
-    for (subpath_idx, lines) in body_lines.iter().enumerate() {
+    for (subpath_idx, (lines, candidates)) in body_lines.iter().zip(touch_candidates).enumerate() {
         let mut run_start: Option<usize> = None;
-        for (line_idx, line) in lines.iter().copied().enumerate() {
-            let candidate = !close_enough(line.p0, line.p1, eps)
-                && boundary.line_may_touch_boundary(line, boundary_tol);
+        for (line_idx, candidate) in candidates.iter().copied().enumerate() {
             match (run_start, candidate) {
                 (None, true) => run_start = Some(line_idx),
                 (Some(start), false) => {
@@ -368,6 +364,26 @@ fn collect_split_ts(
         Ok(()) => Ok(split_ts),
         Err(_) => Err(PathOpsErr::LinesweeperFailed("linesweeper panicked".into())),
     }
+}
+
+fn body_touch_candidates(
+    body_lines: &[Vec<FlatLine>],
+    boundary: &BoundaryIndex,
+    boundary_tol: f64,
+    eps: f64,
+) -> Vec<Vec<bool>> {
+    body_lines
+        .iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| {
+                    !close_enough(line.p0, line.p1, eps)
+                        && boundary.line_may_touch_boundary(*line, boundary_tol)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn add_body_run(
@@ -500,6 +516,151 @@ fn chunks_to_wire(
         .collect()
 }
 
+pub(crate) struct PreparedLineClip<'a> {
+    clip_bez: &'a BezPath,
+    flat_clip: Vec<FlatSubpath>,
+    boundary: BoundaryIndex,
+    fill_rule: FillRule,
+    mode: ClipMode,
+    eps: f64,
+    flatten_tol: f64,
+    point_tol: f64,
+    boundary_tol: f64,
+    empty_clip: bool,
+}
+
+impl<'a> PreparedLineClip<'a> {
+    pub(crate) fn new(
+        clip_region: &WirePath,
+        clip_bez: &'a BezPath,
+        fill_rule: FillRule,
+        mode: ClipMode,
+        eps: f64,
+    ) -> Result<Self, PathOpsErr> {
+        let flatten_tol = eps.max(1e-5);
+        let point_tol = eps.max(1e-9);
+        let boundary_tol = (eps.max(flatten_tol)) * 8.0;
+        let flat_clip = if clip_region.is_empty() {
+            Vec::new()
+        } else {
+            flatten_wire(clip_region, flatten_tol, point_tol)
+        };
+        let empty_clip = clip_region.is_empty() || flat_clip.is_empty();
+        let boundary = BoundaryIndex::new(boundary_lines(&flat_clip));
+
+        Ok(Self {
+            clip_bez,
+            flat_clip,
+            boundary,
+            fill_rule,
+            mode,
+            eps,
+            flatten_tol,
+            point_tol,
+            boundary_tol,
+            empty_clip,
+        })
+    }
+
+    pub(crate) fn clip_body(&self, body: &WirePath) -> Result<WirePath, PathOpsErr> {
+        if self.empty_clip {
+            return Ok(match self.mode {
+                ClipMode::Include => WirePath::empty(),
+                ClipMode::Exclude => body.clone(),
+            });
+        }
+
+        let flat_body = flatten_wire(body, self.flatten_tol, self.point_tol);
+        if flat_body.is_empty() {
+            return Ok(WirePath::empty());
+        }
+
+        let body_lines: Vec<Vec<FlatLine>> = flat_body
+            .iter()
+            .map(|sp| lines_for_subpath(sp).collect())
+            .collect();
+        let touch_candidates =
+            body_touch_candidates(&body_lines, &self.boundary, self.boundary_tol, self.eps);
+        let mut split_ts = collect_split_ts(
+            &self.flat_clip,
+            &body_lines,
+            &touch_candidates,
+            self.boundary_tol,
+            self.eps,
+        )?;
+        let mut output = WirePath::empty();
+
+        for (subpath_idx, subpath) in flat_body.iter().enumerate() {
+            let lines = &body_lines[subpath_idx];
+            let may_touch_boundary = touch_candidates[subpath_idx]
+                .iter()
+                .any(|candidate| *candidate);
+            if !may_touch_boundary {
+                let p = lerp(lines[0].p0, lines[0].p1, 0.5);
+                if classify_interval(
+                    self.clip_bez,
+                    &self.boundary,
+                    self.fill_rule,
+                    self.mode,
+                    p,
+                    self.boundary_tol,
+                ) {
+                    output
+                        .subpaths
+                        .push(body.subpaths[subpath.original_idx].clone());
+                }
+                continue;
+            }
+
+            let mut chunks: Vec<Vec<Point>> = Vec::new();
+            let mut all_kept = true;
+            let mut any_kept = false;
+            for (line_idx, line) in lines.iter().copied().enumerate() {
+                let ts = &mut split_ts[subpath_idx][line_idx];
+                normalize_ts(ts, line, self.eps);
+                for pair in ts.windows(2) {
+                    let t0 = pair[0];
+                    let t1 = pair[1];
+                    if t1 <= t0 {
+                        continue;
+                    }
+                    let mid = lerp(line.p0, line.p1, (t0 + t1) * 0.5);
+                    if classify_interval(
+                        self.clip_bez,
+                        &self.boundary,
+                        self.fill_rule,
+                        self.mode,
+                        mid,
+                        self.boundary_tol,
+                    ) {
+                        any_kept = true;
+                        push_chunk(
+                            &mut chunks,
+                            lerp(line.p0, line.p1, t0),
+                            lerp(line.p0, line.p1, t1),
+                            self.point_tol,
+                        );
+                    } else {
+                        all_kept = false;
+                    }
+                }
+            }
+            if all_kept && any_kept {
+                output
+                    .subpaths
+                    .push(body.subpaths[subpath.original_idx].clone());
+            } else if any_kept {
+                output
+                    .subpaths
+                    .extend(chunks_to_wire(chunks, subpath.closed, self.point_tol));
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn clip_line_path(
     clip_region: &WirePath,
     body: &WirePath,
@@ -507,80 +668,8 @@ pub(crate) fn clip_line_path(
     mode: ClipMode,
     eps: f64,
 ) -> Result<WirePath, PathOpsErr> {
-    if clip_region.is_empty() {
-        return Ok(match mode {
-            ClipMode::Include => WirePath::empty(),
-            ClipMode::Exclude => body.clone(),
-        });
-    }
-
     let clip_bez = wire_to_closed_bez(clip_region)?;
-    let flatten_tol = eps.max(1e-5);
-    let point_tol = eps.max(1e-9);
-    let boundary_tol = (eps.max(flatten_tol)) * 8.0;
-    let flat_clip = flatten_wire(clip_region, flatten_tol, point_tol);
-    if flat_clip.is_empty() {
-        return Ok(match mode {
-            ClipMode::Include => WirePath::empty(),
-            ClipMode::Exclude => body.clone(),
-        });
-    }
-    let flat_body = flatten_wire(body, flatten_tol, point_tol);
-    if flat_body.is_empty() {
-        return Ok(WirePath::empty());
-    }
-
-    let boundary = boundary_lines(&flat_clip);
-    let boundary = BoundaryIndex::new(boundary);
-    let body_lines: Vec<Vec<FlatLine>> = flat_body
-        .iter()
-        .map(|sp| lines_for_subpath(sp).collect())
-        .collect();
-    let mut split_ts = collect_split_ts(&flat_clip, &body_lines, &boundary, boundary_tol, eps)?;
-    let mut output = WirePath::empty();
-
-    for (subpath_idx, subpath) in flat_body.iter().enumerate() {
-        let lines = &body_lines[subpath_idx];
-        let mut chunks: Vec<Vec<Point>> = Vec::new();
-        let mut all_kept = true;
-        let mut any_kept = false;
-        let mut may_touch_boundary = false;
-        for (line_idx, line) in lines.iter().copied().enumerate() {
-            may_touch_boundary |= boundary.line_may_touch_boundary(line, boundary_tol);
-            let ts = &mut split_ts[subpath_idx][line_idx];
-            normalize_ts(ts, line, eps);
-            for pair in ts.windows(2) {
-                let t0 = pair[0];
-                let t1 = pair[1];
-                if t1 <= t0 {
-                    continue;
-                }
-                let mid = lerp(line.p0, line.p1, (t0 + t1) * 0.5);
-                if classify_interval(&clip_bez, &boundary, fill_rule, mode, mid, boundary_tol) {
-                    any_kept = true;
-                    push_chunk(
-                        &mut chunks,
-                        lerp(line.p0, line.p1, t0),
-                        lerp(line.p0, line.p1, t1),
-                        point_tol,
-                    );
-                } else {
-                    all_kept = false;
-                }
-            }
-        }
-        if !may_touch_boundary && all_kept && any_kept {
-            output
-                .subpaths
-                .push(body.subpaths[subpath.original_idx].clone());
-        } else if any_kept {
-            output
-                .subpaths
-                .extend(chunks_to_wire(chunks, subpath.closed, point_tol));
-        }
-    }
-
-    Ok(output)
+    PreparedLineClip::new(clip_region, &clip_bez, fill_rule, mode, eps)?.clip_body(body)
 }
 
 #[cfg(test)]

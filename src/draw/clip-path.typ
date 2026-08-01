@@ -110,14 +110,14 @@
   })
 }
 
-/// Clips one path drawable by a closed clip region.
+/// Clips one or more path drawables by a closed clip region.
 ///
-/// `clip-region` may contain multiple closed path drawables. `body` must
-/// currently resolve to exactly one path drawable, which may contain both open
+/// `clip-region` may contain multiple closed path drawables. `body` may
+/// resolve to one or more path drawables, each of which may contain both open
 /// and closed subpaths.
 ///
 /// - clip-region (elements, str): Closed paths defining the clipping region.
-/// - body (elements, str): Exactly one path drawable to clip.
+/// - body (elements, str): One or more path drawables to clip.
 /// - mode (string): `"include"` keeps the part inside the clip region; `"exclude"` keeps the outside.
 /// - clip-fill-rule (auto, string): `"non-zero"` or `"even-odd"`, applied to `clip-region`.
 /// - body-fill-rule (auto, string): `"non-zero"` or `"even-odd"`, applied to filled closed body subpaths.
@@ -168,30 +168,16 @@
       )
 
       assert(
-        body-drawables.len() == 1,
-        message: "clip-path: body must resolve to exactly one path drawable; got " + repr(body-drawables.len()),
+        body-drawables.len() > 0,
+        message: "clip-path: body must resolve to at least one path drawable; got 0",
       )
-      let body-drawable = body-drawables.first()
 
       let clip-path3d = clip-drawables.map(d => d.segments).join(default: ())
-      let body-path3d = body-drawable.segments
       let (clip-wire, clip-z) = _path3d-to-wire2d(
         clip-path3d,
         "clip-path",
         require-closed: true,
       )
-      let (body-wire, body-z) = _path3d-to-wire2d(
-        body-path3d,
-        "clip-path",
-      )
-
-      if clip-wire.subpaths.len() > 0 and body-wire.subpaths.len() > 0 {
-        assert(
-          calc.abs(clip-z - body-z) < 1e-6,
-          message: "clip-path: input paths must lie in the same z-plane; got z=" + repr(clip-z) + " and z=" + repr(body-z),
-        )
-      }
-      let z0 = if body-wire.subpaths.len() > 0 { body-z } else { clip-z }
 
       let base-style = styles.resolve(ctx.style)
       let resolved-clip-fill-rule = _infer-fill-rule(
@@ -199,15 +185,45 @@
         clip-drawables.map(d => d.fill-rule),
         base-style.fill-rule,
       )
-      let resolved-body-fill-rule = if body-fill-rule == auto {
-        body-drawable.fill-rule
-      } else {
-        body-fill-rule
+
+      let body-items = ()
+      let batch-bodies = ()
+      let any-output = false
+      for body-drawable in body-drawables {
+        let (body-wire, body-z) = _path3d-to-wire2d(
+          body-drawable.segments,
+          "clip-path",
+        )
+
+        if clip-wire.subpaths.len() > 0 and body-wire.subpaths.len() > 0 {
+          assert(
+            calc.abs(clip-z - body-z) < 1e-6,
+            message: "clip-path: input paths must lie in the same z-plane; got z=" + repr(clip-z) + " and z=" + repr(body-z),
+          )
+        }
+
+        let resolved-body-fill-rule = if body-fill-rule == auto {
+          body-drawable.fill-rule
+        } else {
+          body-fill-rule
+        }
+        let need-area = body-drawable.fill != none
+        let need-line = body-drawable.stroke != none
+        any-output = any-output or need-area or need-line
+
+        body-items.push((
+          drawable: body-drawable,
+          z: body-z,
+        ))
+        batch-bodies.push((
+          body: body-wire,
+          body_fill_rule: resolved-body-fill-rule,
+          need_line: need-line,
+          need_area: need-area,
+        ))
       }
 
-      let need-area = body-drawable.fill != none
-      let need-line = body-drawable.stroke != none
-      if not need-area and not need-line {
+      if not any-output {
         return (
           ctx: ctx,
           name: name,
@@ -220,42 +236,50 @@
         )
       }
 
-      let result = call_wasm(cetz-core.clip_path_func, (
+      let result = call_wasm(cetz-core.clip_path_batch_func, (
         clip_region: clip-wire,
-        body: body-wire,
+        bodies: batch-bodies,
         mode: mode,
         clip_fill_rule: resolved-clip-fill-rule,
-        body_fill_rule: resolved-body-fill-rule,
         eps: if eps == auto { none } else { eps },
-        need_line: need-line,
-        need_area: need-area,
       ))
+      assert(
+        result.outputs.len() == body-items.len(),
+        message: "clip-path: wasm returned " + repr(result.outputs.len()) + " outputs for " + repr(body-items.len()) + " inputs",
+      )
 
       let drawables = ()
-      if result.area_path != none {
-        let path3d = _wire2d-to-path3d(result.area_path, z0)
-        if path3d.len() > 0 {
-          let d = drawable.path(
-            fill: body-drawable.fill,
-            fill-rule: body-drawable.fill-rule,
-            stroke: none,
-            tags: body-drawable.at("tags", default: ()),
-            path3d,
-          )
-          drawables.push(d)
+      for (idx, output) in result.outputs.enumerate() {
+        let item = body-items.at(idx)
+        let body-drawable = item.drawable
+        let z0 = item.z
+
+        if output.area_path != none {
+          let path3d = _wire2d-to-path3d(output.area_path, z0)
+          if path3d.len() > 0 {
+            let d = drawable.path(
+              fill: body-drawable.fill,
+              fill-rule: body-drawable.fill-rule,
+              stroke: none,
+              tags: body-drawable.at("tags", default: ()),
+              path3d,
+            )
+            drawables.push(d)
+          }
         }
-      }
-      if result.line_path != none {
-        let path3d = _wire2d-to-path3d(result.line_path, z0)
-        if path3d.len() > 0 {
-          let d = drawable.path(
-            fill: none,
-            fill-rule: body-drawable.fill-rule,
-            stroke: body-drawable.stroke,
-            tags: body-drawable.at("tags", default: ()),
-            path3d,
-          )
-          drawables.push(d)
+
+        if output.line_path != none {
+          let path3d = _wire2d-to-path3d(output.line_path, z0)
+          if path3d.len() > 0 {
+            let d = drawable.path(
+              fill: none,
+              fill-rule: body-drawable.fill-rule,
+              stroke: body-drawable.stroke,
+              tags: body-drawable.at("tags", default: ()),
+              path3d,
+            )
+            drawables.push(d)
+          }
         }
       }
 

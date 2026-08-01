@@ -1,5 +1,6 @@
 use std::panic::AssertUnwindSafe;
 
+use kurbo::BezPath;
 use linesweeper::topology::{BinaryWindingNumber, Topology};
 use linesweeper::FillRule;
 
@@ -43,6 +44,29 @@ pub(crate) fn boolean_wire_paths(
         None => auto_eps(&[&a, &b])?,
     };
 
+    boolean_bez_paths(&a, &b, op, fill_rule_a, fill_rule_b, eps)
+}
+
+pub(crate) fn boolean_wire_path_with_clip_bez(
+    a: &WirePath,
+    clip_bez: &BezPath,
+    op: BoolOp,
+    fill_rule_a: FillRule,
+    fill_rule_clip: FillRule,
+    eps: f64,
+) -> Result<WirePath, PathOpsErr> {
+    let a = wire_to_closed_bez(a)?;
+    boolean_bez_paths(&a, clip_bez, op, fill_rule_a, fill_rule_clip, eps)
+}
+
+fn boolean_bez_paths(
+    a: &BezPath,
+    b: &BezPath,
+    op: BoolOp,
+    fill_rule_a: FillRule,
+    fill_rule_b: FillRule,
+    eps: f64,
+) -> Result<WirePath, PathOpsErr> {
     // catch_unwind so a panic inside linesweeper turns into a recoverable
     // error rather than aborting the WASM module.
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {

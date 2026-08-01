@@ -181,3 +181,10 @@ pub fn clip_path_func(input: &[u8]) -> Result<Vec<u8>, String> {
         clip_path::clip_path(args).map_err(|e| e.to_string())
     })
 }
+
+#[wasm_func]
+pub fn clip_path_batch_func(input: &[u8]) -> Result<Vec<u8>, String> {
+    handle_cbor(input, |args: clip_path::ClipPathBatchArgs| {
+        clip_path::clip_path_batch(args).map_err(|e| e.to_string())
+    })
+}
