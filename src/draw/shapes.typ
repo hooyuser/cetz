@@ -554,7 +554,8 @@
 /// If the first or last coordinates are given as the name of an element,
 /// that has a `"default"` anchor, the intersection of that element's border
 /// and a line from the first or last two coordinates given is used as coordinate.
-/// This is useful to span a line between the borders of two elements.
+/// This is useful to span a line between the borders of two elements. Note, that passing
+/// strings bypasses custom resolvers when trying to find elements!
 ///
 /// ```example
 /// circle((1,2), radius: .5, name: "a")
@@ -604,18 +605,21 @@
 
   return (ctx => {
     let first-elem = pts.first()
+    let first-is-elem = type(first-elem) == str and not first-elem.contains(".")
+
     let last-elem = pts.last()
-    let pts-system = pts.map(coordinate.resolve-system.with(ctx))
+    let last-is-elem = type(last-elem) == str and not last-elem.contains(".")
+
     let (ctx, ..pts) = coordinate.resolve(ctx, ..pts)
 
     // If the first/last element, test for intersection
     // of that element and a line from the two first/last coordinates of this
     // line strip.
-    if pts-system.first() == "element" {
+    if first-is-elem {
       let elem = ctx.nodes.at(first-elem)
       pts.first() = element-line-intersection(ctx, elem, ..pts.slice(0, 2))
     }
-    if pts-system.last() == "element" {
+    if last-is-elem {
       let elem = ctx.nodes.at(last-elem)
       pts.last() = element-line-intersection(ctx, elem, ..pts.slice(-2).rev())
     }
@@ -1995,8 +1999,11 @@
   )
 }
 
-/// Draws an axis aligned bounding box around all given points/elements.
-/// Everything else (styling, anchors) is similar to the rect shape.
+/// Draws an axis aligned bounding box around all given coordinates and/or elements.
+/// Everything else (styling, anchors) is similar to `rect`.
+///
+/// Bounds of elements are calculated by computing the bounding box of their paths,
+/// or as a fallback, using all anchors of the element.
 ///
 /// ```example
 /// circle((1, 1), radius: 0.1, fill: blue, name: "c1")
@@ -2005,6 +2012,10 @@
 /// rect-around("c1", "c2", "r1", stroke: yellow, padding: 0.1)
 /// ```
 /// - ..pts-style (coordinates,style): Positional two or more coordinates/elements to calculate bounding box of. Accepts style key-value pairs.
+/// - ignore-marks (bool): If true, ignore mark shapes when calculating a shape's bounding box
+/// - ignore-hidden (bool):
+/// - ignore-floating (bool):
+/// - ignore-shapes (bool): Use only anchors for bounds calculation
 ///
 /// == Styling
 /// The padding attribute can be used to control spacing.
@@ -2012,28 +2023,50 @@
 ///
 /// == Anchors
 /// The same as for the rect shape.
-#let rect-around(..pts-style) = {
+#let rect-around(..pts-style, ignore-marks: false, ignore-hidden: false, ignore-floating: false, ignore-shapes: false) = {
   let pts = pts-style.pos()
   let style = pts-style.named()
 
-  let ctx = get-ctx((ctx) => {
-    let more_points = ()
+  get-ctx(ctx => {
+
+    let inverse = matrix.inverse(ctx.transform)
+
+    let bounds = ()
     for pt in pts {
-      // If objects are given (by string name), include all anchors
+      // If elements are given (by name)
       if type(pt) == str and pt in ctx.nodes {
-        for anchor in (ctx.nodes.at(pt).anchors)(()) {
-          let temp = pt + "." + anchor
-          more_points.push(temp)
+        let original = if not ignore-shapes { ctx.nodes.at(pt).at("drawables", default: ()) } else { () }
+        let filtered = drawable.filter-tagged(
+          original,
+          drawable.TAG.debug,
+          if ignore-marks { drawable.TAG.mark },
+          if ignore-hidden { drawable.TAG.hidden },
+          if ignore-floating { drawable.TAG.no-bounds },
+        )
+
+        if filtered != () {
+          for d in filtered {
+            bounds += path-util.bounds(d.segments, transform: inverse)
+          }
+        } else if original == () {
+          // If we have no drawables (e.g. an anchor element)
+          // we fall back to all anchors the element has.
+          let anchors = (ctx.nodes.at(pt).anchors)(()).map(v => pt + "." + v)
+          let (_, ..pts) = coordinate.resolve(ctx, ..anchors)
+          bounds += pts
         }
       } else {
-        more_points.push(pt)
+        (ctx, pt) = coordinate.resolve(ctx, pt)
+        bounds.push(pt)
       }
+    }
+
+    if bounds == () {
+      return
     }
 
     let style = styles.resolve(ctx.style, merge: style, root: "rect", base: (padding: none))
 
-    let (ctx, ..vecs) = coordinate.resolve(ctx, ..more_points)
-    let bounds = aabb.aabb(vecs)
     // Resolve padding and convert to canvas units
     let padding = util.as-padding-dict(style.padding)
     // Swap top and bottom padding for reasons
@@ -2041,11 +2074,10 @@
     for (k, v) in padding {
       padding.insert(k, util.resolve-number(ctx, v))
     }
-    let newbounds = aabb.padded(bounds, padding)
 
-    rect(newbounds.low, newbounds.high, ..style)
+    let new-bounds = aabb.padded(aabb.aabb(bounds), padding)
+    rect(new-bounds.low, new-bounds.high, ..style)
   })
-  return ctx
 }
 
 /// Create a new path from a SVG-like list of commands.
